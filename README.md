@@ -4,12 +4,13 @@ This repository demonstrates how to build and use custom AI worker agents in Har
 
 ## What is a Harness Custom AI Agent?
 
-A custom AI agent is a reusable, versioned AI worker that runs as a native step in any Harness pipeline stage. It has two parts:
+A custom AI agent is a reusable, versioned AI worker that runs as a native step in any Harness pipeline stage. It has three parts:
 
-1. **Instructions** — a Markdown file that serves as the agent's system prompt. It defines the agent's role, what inputs it expects, and how it should format its response.
-2. **Agent definition** — registered in Harness with a name, version, and an LLM connector. Once registered, the agent is available to any pipeline in your account.
+1. **Instructions** — a Markdown file that serves as the agent's system prompt. It defines the agent's role, references the declared inputs by name, and specifies the expected output format.
+2. **Inputs** — named, typed parameters declared on the agent definition. Inputs are the contract between the agent and the pipelines that use it. Each pipeline step that invokes the agent supplies values for those inputs — from hardcoded strings, pipeline variables, or the output of earlier steps.
+3. **Agent definition** — registered in Harness with a name, version, LLM connector, inputs schema, and instructions. Once registered, the agent is available to any pipeline in your account.
 
-Agents are invoked using the **Agent** step type. The step references the agent by name and version, specifies the LLM connector to use, and passes pipeline context as inputs. Downstream steps can reference the agent's output variables using standard Harness expressions.
+Agents are invoked using the **Agent** step type. The step references the agent by name and version, specifies the LLM connector to use, and supplies values for each declared input. Downstream steps reference the agent's output using standard Harness expressions.
 
 ```yaml
 - step:
@@ -23,6 +24,8 @@ Agents are invoked using the **Agent** step type. The step references the agent 
       inputs:
         MY_CONTEXT: <+execution.steps.Previous_Step.output.outputVariables.LOGS>
 ```
+
+![](assets/agent_pipeline.png)
 
 ## Repository Structure
 
@@ -69,9 +72,26 @@ Agents are invoked using the **Agent** step type. The step references the agent 
 
 ## Creating Your Own Agent
 
-### 1. Write the agent instructions
+### 1. Define agent inputs
 
-Create a Markdown file that describes what the agent does, what inputs it receives, and what output format it should produce. This file becomes the LLM system prompt, so be specific.
+Inputs are the named parameters your agent needs to do its job. Think of them as the agent's function signature — declaring them explicitly makes the agent self-documenting and allows any pipeline to supply the right context at invocation time.
+
+For example, a code coverage agent might declare:
+
+| Input | Type | Description |
+|-------|------|-------------|
+| `repo` | String | Repository name (e.g. `my-org/my-app`) |
+| `branch` | String | Branch being evaluated |
+| `coverage_report` | String | Raw coverage output from the test runner |
+| `threshold` | Number | Minimum acceptable coverage percentage |
+
+A CI build analyzer might declare `build_logs`, `test_results`, and `changed_files`. A deployment advisor might declare `manifest`, `environment`, and `change_summary`. Inputs should be as specific as possible — an agent that receives a targeted `coverage_report` string will produce better results than one that receives a wall of undifferentiated pipeline logs.
+
+Inputs are declared in the agent definition (see step 2) and referenced by name inside the instructions.
+
+### 2. Write the agent instructions
+
+Create a Markdown file that describes what the agent does, references the declared inputs by name, and specifies the output format. This file becomes the LLM system prompt, so be specific.
 
 ```markdown
 # My Custom Agent
@@ -80,8 +100,11 @@ Create a Markdown file that describes what the agent does, what inputs it receiv
 You are a <describe role>.
 
 ## Inputs
-You will receive the following context from the Harness pipeline:
-- `CONTEXT_VAR`: description of what it contains
+The following values are provided by the pipeline:
+- `repo`: the repository being analyzed (e.g. `my-org/my-app`)
+- `branch`: the branch under review
+- `coverage_report`: raw output from the test coverage tool
+- `threshold`: minimum acceptable coverage percentage (numeric)
 
 ## Output Format
 Respond only with a JSON object:
@@ -96,7 +119,7 @@ Respond only with a JSON object:
 
 See [`agent-instructions/`](agent-instructions/) for real examples.
 
-### 2. Register the agent in Harness
+### 3. Register the agent in Harness
 
 In the Harness UI, navigate to **Account Settings → AI Agents → New Agent**. Provide:
 
