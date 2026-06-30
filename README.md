@@ -4,12 +4,25 @@ This repository demonstrates how to build and use custom AI worker agents in Har
 
 ## What is a Harness Custom AI Agent?
 
-A custom AI agent is a pipeline step with two parts:
+A custom AI agent is a reusable, versioned AI worker that runs as a native step in any Harness pipeline stage. It has two parts:
 
 1. **Instructions** — a Markdown file that serves as the agent's system prompt. It defines the agent's role, what inputs it expects, and how it should format its response.
-2. **Runner** — a Python script packaged in a Docker image. It reads pipeline context from environment variables, calls an LLM (Claude) using the instructions, and emits results as Harness output variables.
+2. **Agent definition** — registered in Harness with a name, version, and an LLM connector. Once registered, the agent is available to any pipeline in your account.
 
-Agents are invoked as **Plugin** steps in any Harness stage type (CI, CD, IaC, STO, Custom). The pipeline passes context through step settings; the agent writes its findings to `/harness/output.env` so downstream steps can act on them.
+Agents are invoked using the **Agent** step type. The step references the agent by name and version, specifies the LLM connector to use, and passes pipeline context as inputs. Downstream steps can reference the agent's output variables using standard Harness expressions.
+
+```yaml
+- step:
+    name: My AI Agent
+    identifier: My_AI_Agent
+    type: Agent
+    spec:
+      agentId: my-custom-agent
+      agentVersion: 1.0.0
+      connectorRef: my_llm_connector
+      inputs:
+        MY_CONTEXT: <+execution.steps.Previous_Step.output.outputVariables.LOGS>
+```
 
 ## Repository Structure
 
@@ -50,10 +63,9 @@ Agents are invoked as **Plugin** steps in any Harness stage type (CI, CD, IaC, S
 
 ## Prerequisites
 
-- A Harness account with at least one Harness Cloud or Kubernetes build infrastructure
-- An Anthropic API key stored as a Harness secret named `anthropic_api_key`
-- Docker (to build and push agent images)
-- Python 3.11+ (to run agents locally during development)
+- A Harness account with AI Agents enabled
+- An LLM connector configured in Harness (Anthropic, OpenAI, or another supported provider)
+- At least one Harness Cloud or Kubernetes build infrastructure for the pipeline stages that surround the agent step
 
 ## Creating Your Own Agent
 
@@ -84,66 +96,42 @@ Respond only with a JSON object:
 
 See [`agent-instructions/`](agent-instructions/) for real examples.
 
-### 2. Implement the agent runner
+### 2. Register the agent in Harness
 
-```python
-# agent/main.py
-import os, json, anthropic
+In the Harness UI, navigate to **Account Settings → AI Agents → New Agent**. Provide:
 
-def main():
-    with open("/agent/instructions.md") as f:
-        system_prompt = f.read()
+- **Name** and **ID** — used to reference the agent in pipelines
+- **Version** — semantic version (e.g., `1.0.0`)
+- **Instructions** — paste the contents of your Markdown file, or point to the file in your repo
+- **LLM Connector** — select the Harness connector for your LLM provider (Anthropic, OpenAI, etc.)
 
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    context = os.environ.get("MY_CONTEXT", "")
+You can also define agents via the Harness API or YAML:
 
-    response = client.messages.create(
-        model="claude-opus-4-7",
-        max_tokens=2048,
-        system=system_prompt,
-        messages=[{"role": "user", "content": context}],
-    )
-
-    result = json.loads(response.content[0].text)
-    print(json.dumps(result, indent=2))
-
-    with open("/harness/output.env", "a") as f:
-        f.write(f"AGENT_SUMMARY={result['summary']}\n")
-        f.write(f"AGENT_SEVERITY={result['severity']}\n")
-
-if __name__ == "__main__":
-    main()
+```yaml
+agent:
+  name: My Custom Agent
+  identifier: my_custom_agent
+  version: 1.0.0
+  llmConnectorRef: my_llm_connector
+  instructions: |
+    # My Custom Agent
+    ...
 ```
 
-### 3. Build and push the Docker image
+### 3. Use the agent in a Harness pipeline
 
-```dockerfile
-FROM python:3.11-slim
-WORKDIR /agent
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-COPY instructions.md .
-COPY main.py .
-ENTRYPOINT ["python", "main.py"]
-```
-
-```bash
-docker build -t myregistry/my-agent:latest ./agent
-docker push myregistry/my-agent:latest
-```
-
-### 4. Use the agent in a Harness pipeline
+Reference the registered agent with the **Agent** step type. Pass pipeline context as inputs and reference the agent's output in downstream steps:
 
 ```yaml
 - step:
     name: My AI Agent
     identifier: My_AI_Agent
-    type: Plugin
+    type: Agent
     spec:
-      connectorRef: my_docker_registry
-      image: myregistry/my-agent:latest
-      settings:
-        ANTHROPIC_API_KEY: <+secrets.getValue("anthropic_api_key")>
+      agentId: my_custom_agent
+      agentVersion: 1.0.0
+      connectorRef: my_llm_connector
+      inputs:
         MY_CONTEXT: <+execution.steps.Previous_Step.output.outputVariables.LOGS>
 ```
 
