@@ -1,0 +1,108 @@
+pipeline:
+  name: CI with AI Build Analysis
+  identifier: CI_with_AI_Build_Analysis
+  projectIdentifier: default
+  orgIdentifier: default
+  tags: {}
+  properties:
+    ci:
+      codebase:
+        connectorRef: your_github_connector
+        repoName: your-repo
+        build: <+input>
+
+  stages:
+    - stage:
+        name: Build and Test
+        identifier: Build_and_Test
+        type: CI
+        spec:
+          cloneCodebase: true
+          infrastructure:
+            type: KubernetesDirect
+            spec:
+              connectorRef: your_k8s_connector
+              namespace: harness-builds
+              automountServiceAccountToken: true
+              nodeSelector: {}
+
+          execution:
+            steps:
+              - step:
+                  name: Install Dependencies
+                  identifier: Install_Dependencies
+                  type: Run
+                  spec:
+                    connectorRef: account.harnessImage
+                    image: python:3.11-slim
+                    command: pip install -r requirements.txt
+                    envVariables:
+                      PIP_NO_CACHE_DIR: "1"
+
+              - step:
+                  name: Build
+                  identifier: Build
+                  type: Run
+                  spec:
+                    connectorRef: account.harnessImage
+                    image: python:3.11-slim
+                    command: python -m build 2>&1 | tee /harness/build.log; exit ${PIPESTATUS[0]}
+
+              - step:
+                  name: Run Tests
+                  identifier: Run_Tests
+                  type: Run
+                  # Run even when Build fails so the agent sees both logs
+                  failureStrategies:
+                    - onFailure:
+                        errors:
+                          - AllErrors
+                        action:
+                          type: Ignore
+                  spec:
+                    connectorRef: account.harnessImage
+                    image: python:3.11-slim
+                    command: |
+                      python -m pytest tests/ \
+                        --junitxml=/harness/test-results.xml \
+                        -v 2>&1 | tee /harness/test.log
+
+              - step:
+                  name: AI Build Analysis
+                  identifier: AI_Build_Analysis
+                  type: Plugin
+                  when:
+                    stageStatus: Failure
+                  spec:
+                    connectorRef: your_docker_registry_connector
+                    image: your-registry/ci-build-analyzer:latest
+                    settings:
+                      ANTHROPIC_API_KEY: <+secrets.getValue("anthropic_api_key")>
+                      BUILD_LOG_PATH: /harness/build.log
+                      TEST_LOG_PATH: /harness/test.log
+                      TEST_RESULTS_PATH: /harness/test-results.xml
+                      CHANGED_FILES: <+codebase.changedFiles>
+
+    - stage:
+        name: Notify
+        identifier: Notify
+        type: Custom
+        spec:
+          execution:
+            steps:
+              - step:
+                  name: Post Analysis to Slack
+                  identifier: Post_Analysis_to_Slack
+                  type: Http
+                  spec:
+                    url: <+secrets.getValue("slack_webhook_url")>
+                    method: POST
+                    requestBody: >-
+                      {
+                        "text": "*Build Failed* — AI Analysis: <+pipeline.stages.Build_and_Test.spec.execution.steps.AI_Build_Analysis.output.outputVariables.AGENT_SUMMARY>\n*Confidence:* <+pipeline.stages.Build_and_Test.spec.execution.steps.AI_Build_Analysis.output.outputVariables.AGENT_CONFIDENCE>\n*Pipeline:* <+pipeline.executionUrl>"
+                      }
+                    headers:
+                      - key: Content-Type
+                        value: application/json
+        dependsOn:
+          - Build_and_Test

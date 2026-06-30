@@ -1,0 +1,169 @@
+pipeline:
+  name: STO with AI Security Triage
+  identifier: STO_with_AI_Security_Triage
+  projectIdentifier: default
+  orgIdentifier: default
+  tags: {}
+  properties:
+    ci:
+      codebase:
+        connectorRef: your_github_connector
+        repoName: your-repo
+        build: <+input>
+
+  stages:
+    - stage:
+        name: Build Image
+        identifier: Build_Image
+        type: CI
+        spec:
+          cloneCodebase: true
+          infrastructure:
+            type: KubernetesDirect
+            spec:
+              connectorRef: your_k8s_connector
+              namespace: harness-builds
+          execution:
+            steps:
+              - step:
+                  name: Build and Push
+                  identifier: Build_and_Push
+                  type: BuildAndPushDockerRegistry
+                  spec:
+                    connectorRef: your_docker_registry_connector
+                    repo: your-registry/your-app
+                    tags:
+                      - <+pipeline.sequenceId>
+                      - latest
+
+    - stage:
+        name: Security Scan
+        identifier: Security_Scan
+        type: SecurityTests
+        spec:
+          cloneCodebase: false
+          infrastructure:
+            type: KubernetesDirect
+            spec:
+              connectorRef: your_k8s_connector
+              namespace: harness-builds
+          execution:
+            steps:
+              - step:
+                  name: Grype Container Scan
+                  identifier: Grype_Container_Scan
+                  type: Grype
+                  spec:
+                    mode: orchestration
+                    config: default
+                    target:
+                      type: container
+                      name: your-registry/your-app
+                      variant: <+pipeline.sequenceId>
+                    advanced:
+                      log:
+                        level: info
+                    privileged: true
+                    image:
+                      type: docker_v2
+                      name: your-registry/your-app
+                      tag: <+pipeline.sequenceId>
+
+              - step:
+                  name: Snyk SAST
+                  identifier: Snyk_SAST
+                  type: Snyk
+                  spec:
+                    mode: orchestration
+                    config: default
+                    target:
+                      type: repository
+                      name: your-repo
+                      variant: <+codebase.branch>
+                    advanced:
+                      log:
+                        level: info
+                    auth:
+                      access_token: <+secrets.getValue("snyk_token")>
+
+              - step:
+                  name: Export STO Results
+                  identifier: Export_STO_Results
+                  type: Run
+                  spec:
+                    connectorRef: account.harnessImage
+                    image: curlimages/curl:8.5.0
+                    command: |
+                      # Export normalized findings from Harness STO API
+                      curl -sf \
+                        -H "x-api-key: <+secrets.getValue("harness_api_key")>" \
+                        "https://app.harness.io/gateway/sto/api/v1/issues?accountId=<+account.identifier>&projectId=<+project.identifier>&pipelineId=<+pipeline.identifier>&executionId=<+pipeline.executionId>" \
+                        -o /harness/sto-findings.json || echo '[]' > /harness/sto-findings.json
+
+              - step:
+                  name: AI Security Triage
+                  identifier: AI_Security_Triage
+                  type: Plugin
+                  spec:
+                    connectorRef: your_docker_registry_connector
+                    image: your-registry/sto-security-triage:latest
+                    settings:
+                      ANTHROPIC_API_KEY: <+secrets.getValue("anthropic_api_key")>
+                      SCAN_RESULTS_PATH: /harness/sto-findings.json
+                      IMAGE: your-registry/your-app:<+pipeline.sequenceId>
+                      SERVICE: your-app / <+pipeline.variables.targetEnvironment>
+                      BASELINE_PATH: /harness/baseline.json
+
+              - step:
+                  name: Enforce Security Gate
+                  identifier: Enforce_Security_Gate
+                  type: Run
+                  spec:
+                    connectorRef: account.harnessImage
+                    image: alpine:3.19
+                    command: |
+                      GATE="<+execution.steps.AI_Security_Triage.output.outputVariables.AGENT_GATE>"
+                      SUMMARY="<+execution.steps.AI_Security_Triage.output.outputVariables.AGENT_SUMMARY>"
+                      echo "Security gate: ${GATE}"
+                      echo "Summary: ${SUMMARY}"
+                      if [ "${GATE}" = "fail" ]; then
+                        echo "Security gate FAILED — deployment blocked. Review AI triage output."
+                        exit 1
+                      fi
+        dependsOn:
+          - Build_Image
+
+    - stage:
+        name: Deploy to Staging
+        identifier: Deploy_to_Staging
+        type: Deployment
+        spec:
+          deploymentType: Kubernetes
+          service:
+            serviceRef: your-app
+          environment:
+            environmentRef: staging
+            deployToAll: false
+            infrastructureDefinitions:
+              - identifier: staging_infra
+          execution:
+            steps:
+              - step:
+                  name: Rolling Deploy
+                  identifier: Rolling_Deploy
+                  type: K8sRollingDeploy
+                  spec:
+                    skipDryRun: false
+            rollbackSteps:
+              - step:
+                  name: Rolling Rollback
+                  identifier: Rolling_Rollback
+                  type: K8sRollingRollback
+                  spec: {}
+        dependsOn:
+          - Security_Scan
+
+  variables:
+    - name: targetEnvironment
+      type: String
+      value: staging

@@ -1,0 +1,153 @@
+pipeline:
+  name: IaC with AI Plan Review
+  identifier: IaC_with_AI_Plan_Review
+  projectIdentifier: default
+  orgIdentifier: default
+  tags: {}
+  properties:
+    ci:
+      codebase:
+        connectorRef: your_github_connector
+        repoName: your-terraform-repo
+        build: <+input>
+
+  stages:
+    - stage:
+        name: Terraform Plan
+        identifier: Terraform_Plan
+        type: CI
+        spec:
+          cloneCodebase: true
+          infrastructure:
+            type: KubernetesDirect
+            spec:
+              connectorRef: your_k8s_connector
+              namespace: harness-builds
+
+          execution:
+            steps:
+              - step:
+                  name: Terraform Init
+                  identifier: Terraform_Init
+                  type: Run
+                  spec:
+                    connectorRef: account.harnessImage
+                    image: hashicorp/terraform:1.7
+                    command: terraform init -input=false
+                    envVariables:
+                      TF_CLI_ARGS_init: "-backend-config=bucket=<+pipeline.variables.stateBucket>"
+                      AWS_ACCESS_KEY_ID: <+secrets.getValue("aws_access_key_id")>
+                      AWS_SECRET_ACCESS_KEY: <+secrets.getValue("aws_secret_access_key")>
+
+              - step:
+                  name: Terraform Plan
+                  identifier: Terraform_Plan
+                  type: Run
+                  spec:
+                    connectorRef: account.harnessImage
+                    image: hashicorp/terraform:1.7
+                    command: |
+                      terraform plan \
+                        -var="environment=<+pipeline.variables.targetWorkspace>" \
+                        -no-color \
+                        -out=/harness/tfplan.binary 2>&1 | tee /harness/tfplan.txt
+                      terraform show -no-color /harness/tfplan.binary >> /harness/tfplan.txt
+                    envVariables:
+                      AWS_ACCESS_KEY_ID: <+secrets.getValue("aws_access_key_id")>
+                      AWS_SECRET_ACCESS_KEY: <+secrets.getValue("aws_secret_access_key")>
+
+              - step:
+                  name: AI IaC Review
+                  identifier: AI_IaC_Review
+                  type: Plugin
+                  spec:
+                    connectorRef: your_docker_registry_connector
+                    image: your-registry/iac-reviewer:latest
+                    settings:
+                      ANTHROPIC_API_KEY: <+secrets.getValue("anthropic_api_key")>
+                      PLAN_PATH: /harness/tfplan.txt
+                      WORKSPACE: <+pipeline.variables.targetWorkspace>
+                      CHANGED_MODULES: <+codebase.changedFiles>
+
+              - step:
+                  name: Enforce Gate
+                  identifier: Enforce_Gate
+                  type: Run
+                  spec:
+                    connectorRef: account.harnessImage
+                    image: alpine:3.19
+                    command: |
+                      APPLY="<+execution.steps.AI_IaC_Review.output.outputVariables.AGENT_APPLY_RECOMMENDED>"
+                      RISK="<+execution.steps.AI_IaC_Review.output.outputVariables.AGENT_RISK_LEVEL>"
+                      echo "IaC Review: apply_recommended=${APPLY}, risk=${RISK}"
+                      if [ "${APPLY}" = "false" ]; then
+                        echo "AI Reviewer blocked this apply. Resolve critical findings before retrying."
+                        exit 1
+                      fi
+
+    - stage:
+        name: Terraform Apply
+        identifier: Terraform_Apply
+        type: Approval
+        spec:
+          execution:
+            steps:
+              - step:
+                  name: Manual Approval
+                  identifier: Manual_Approval
+                  type: HarnessApproval
+                  spec:
+                    approvalMessage: |
+                      AI Review Summary: <+pipeline.stages.Terraform_Plan.spec.execution.steps.AI_IaC_Review.output.outputVariables.AGENT_SUMMARY>
+                      Risk Level: <+pipeline.stages.Terraform_Plan.spec.execution.steps.AI_IaC_Review.output.outputVariables.AGENT_RISK_LEVEL>
+
+                      Please review the plan and approve to apply.
+                    includePipelineExecutionHistory: true
+                    approvers:
+                      userGroups:
+                        - account.infrastructure_team
+                      minimumCount: 1
+                    approverInputs: []
+        dependsOn:
+          - Terraform_Plan
+
+    - stage:
+        name: Apply
+        identifier: Apply
+        type: CI
+        spec:
+          cloneCodebase: true
+          infrastructure:
+            type: KubernetesDirect
+            spec:
+              connectorRef: your_k8s_connector
+              namespace: harness-builds
+          execution:
+            steps:
+              - step:
+                  name: Terraform Apply
+                  identifier: Terraform_Apply_Step
+                  type: Run
+                  spec:
+                    connectorRef: account.harnessImage
+                    image: hashicorp/terraform:1.7
+                    command: |
+                      terraform init -input=false
+                      terraform apply \
+                        -var="environment=<+pipeline.variables.targetWorkspace>" \
+                        -auto-approve \
+                        -no-color
+                    envVariables:
+                      AWS_ACCESS_KEY_ID: <+secrets.getValue("aws_access_key_id")>
+                      AWS_SECRET_ACCESS_KEY: <+secrets.getValue("aws_secret_access_key")>
+        dependsOn:
+          - Terraform_Apply
+
+  variables:
+    - name: targetWorkspace
+      type: String
+      value: <+input>
+      allowedValues: dev,staging,prod
+    - name: stateBucket
+      type: String
+      value: your-terraform-state-bucket

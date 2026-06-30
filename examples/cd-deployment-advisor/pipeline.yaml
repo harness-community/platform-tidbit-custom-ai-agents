@@ -1,0 +1,138 @@
+pipeline:
+  name: CD with AI Deployment Advisor
+  identifier: CD_with_AI_Deployment_Advisor
+  projectIdentifier: default
+  orgIdentifier: default
+  tags: {}
+
+  stages:
+    - stage:
+        name: Pre-Deployment Review
+        identifier: Pre_Deployment_Review
+        type: Custom
+        spec:
+          execution:
+            steps:
+              - step:
+                  name: Fetch Current Metrics
+                  identifier: Fetch_Current_Metrics
+                  type: Run
+                  spec:
+                    connectorRef: account.harnessImage
+                    image: curlimages/curl:8.5.0
+                    command: |
+                      # Replace with your observability platform query
+                      curl -sf \
+                        -H "Authorization: Bearer <+secrets.getValue("metrics_api_token")>" \
+                        "https://metrics.example.com/api/query?service=<+pipeline.variables.serviceName>&window=1h" \
+                        -o /harness/metrics.json || echo '{"error_rate": "unknown"}' > /harness/metrics.json
+
+              - step:
+                  name: AI Deployment Advisor
+                  identifier: AI_Deployment_Advisor
+                  type: Plugin
+                  spec:
+                    connectorRef: your_docker_registry_connector
+                    image: your-registry/cd-deployment-advisor:latest
+                    settings:
+                      ANTHROPIC_API_KEY: <+secrets.getValue("anthropic_api_key")>
+                      MANIFEST_PATH: /harness/manifest.yaml
+                      METRICS_PATH: /harness/metrics.json
+                      ENVIRONMENT: <+pipeline.variables.targetEnvironment>
+                      SERVICE_NAME: <+pipeline.variables.serviceName>
+                      CHANGE_SUMMARY: <+pipeline.variables.changeSummary>
+
+              - step:
+                  name: Evaluate Gate
+                  identifier: Evaluate_Gate
+                  type: Run
+                  spec:
+                    connectorRef: account.harnessImage
+                    image: alpine:3.19
+                    command: |
+                      PROCEED="<+execution.steps.AI_Deployment_Advisor.output.outputVariables.AGENT_PROCEED>"
+                      RISK="<+execution.steps.AI_Deployment_Advisor.output.outputVariables.AGENT_RISK_LEVEL>"
+                      echo "Advisor verdict: proceed=${PROCEED}, risk=${RISK}"
+                      if [ "${PROCEED}" = "false" ]; then
+                        echo "AI Advisor blocked this deployment. Review findings before retrying."
+                        exit 1
+                      fi
+
+    - stage:
+        name: Deploy
+        identifier: Deploy
+        type: Deployment
+        spec:
+          deploymentType: Kubernetes
+          service:
+            serviceRef: <+pipeline.variables.serviceName>
+          environment:
+            environmentRef: <+pipeline.variables.targetEnvironment>
+            deployToAll: false
+            infrastructureDefinitions:
+              - identifier: your_infra_definition
+          execution:
+            steps:
+              - stepGroup:
+                  name: Canary Deployment
+                  identifier: Canary_Deployment
+                  steps:
+                    - step:
+                        name: Canary Deploy
+                        identifier: Canary_Deploy
+                        type: K8sCanaryDeploy
+                        spec:
+                          instanceSelection:
+                            type: Percentage
+                            spec:
+                              percentage: 10
+                          skipDryRun: false
+
+                    - step:
+                        name: Canary Verify
+                        identifier: Canary_Verify
+                        type: Verify
+                        spec:
+                          isMultiServicesOrEnvs: false
+                          type: Canary
+                          monitoredService:
+                            type: Default
+                            spec: {}
+                          healthSources: []
+                          duration: 10m
+                        timeout: 2h
+
+                    - step:
+                        name: Canary Delete
+                        identifier: Canary_Delete
+                        type: K8sCanaryDelete
+                        spec: {}
+
+              - step:
+                  name: Rolling Deploy
+                  identifier: Rolling_Deploy
+                  type: K8sRollingDeploy
+                  spec:
+                    skipDryRun: false
+
+            rollbackSteps:
+              - step:
+                  name: Rolling Rollback
+                  identifier: Rolling_Rollback
+                  type: K8sRollingRollback
+                  spec: {}
+        dependsOn:
+          - Pre_Deployment_Review
+
+  variables:
+    - name: serviceName
+      type: String
+      value: <+input>
+    - name: targetEnvironment
+      type: String
+      value: <+input>
+      allowedValues: staging,production
+    - name: changeSummary
+      type: String
+      value: <+input>
+      description: "Brief description of what changed in this release"
