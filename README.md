@@ -2,6 +2,14 @@
 
 This repository demonstrates how to build and use custom AI worker agents in Harness pipelines. Each agent is a Docker container that accepts pipeline context, reasons over it with an LLM, and writes structured output back into the pipeline.
 
+**Contents**
+
+- ❓[What is a Harness Custom AI Agents](#what-is-a-harness-custom-ai-agent)
+- [This Repo's Structure](#repository-structure)
+- [Prerequisites](#prerequisites)
+- [Creating Your Own Agent](#creating-your-own-agent)
+- [Examples](#examples)
+
 ## What is a Harness Custom AI Agent?
 
 A custom AI agent is a reusable, versioned AI worker that runs as a native step in any Harness pipeline stage. It has three parts:
@@ -22,7 +30,9 @@ Agents are invoked using the **Agent** step type. The step references the agent 
       agentVersion: 1.0.0
       connectorRef: my_llm_connector
       inputs:
-        MY_CONTEXT: <+execution.steps.Previous_Step.output.outputVariables.LOGS>
+        repo: <+pipeline.variables.repoName>
+        branch: <+codebase.branch>
+        coverage_report: <+execution.steps.Run_Tests.output.outputVariables.COVERAGE>
 ```
 
 ![](assets/agent_pipeline.png)
@@ -125,6 +135,7 @@ In the Harness UI, navigate to **Account Settings → AI Agents → New Agent**.
 
 - **Name** and **ID** — used to reference the agent in pipelines
 - **Version** — semantic version (e.g., `1.0.0`)
+- **Inputs** — declare each input with a name, type, and description
 - **Instructions** — paste the contents of your Markdown file, or point to the file in your repo
 - **LLM Connector** — select the Harness connector for your LLM provider (Anthropic, OpenAI, etc.)
 
@@ -136,14 +147,62 @@ agent:
   identifier: my_custom_agent
   version: 1.0.0
   llmConnectorRef: my_llm_connector
+  inputs:
+    - name: repo
+      type: String
+      description: Repository name (e.g. my-org/my-app)
+    - name: branch
+      type: String
+      description: Branch being evaluated
+    - name: coverage_report
+      type: String
+      description: Raw output from the test coverage tool
+    - name: threshold
+      type: Number
+      description: Minimum acceptable coverage percentage
   instructions: |
     # My Custom Agent
     ...
 ```
 
-### 3. Use the agent in a Harness pipeline
 
-Reference the registered agent with the **Agent** step type. Pass pipeline context as inputs and reference the agent's output in downstream steps:
+### 4. Add an MCP Server (Optional)
+
+Agents can additionally use an MCP server connector that contains the relevant tools and skills for interacting with another resource. For example, the Harness MCP server can be added to access Harness-native data (like pipelines, executions, services, ect.). 
+
+> [!TIP]
+> MCP servers are an optional resource. It's recommended to add the Harness hosted MCP server when accessing data from Harness or about a pipeline.
+
+MCP servers are added as connectors. Like other connectors, these can live at the account, org, or project levels.
+
+```yaml
+connector:
+  name: Harness MCP Server
+  identifier: Harness_MCP_Server
+  description: ""
+  accountIdentifier: YOUR_ACCOUNT_ID
+  orgIdentifier: YOUR_ORG_ID
+  projectIdentifier: YOUR_PROJECT_ID
+  type: Mcp
+  spec:
+    serverUrl: https://app.harness.io/prod1/mcp-server-external/mcp
+    auth:
+      type: CustomHeader
+      spec:
+        headerName: X-Api-Key
+        headerValueRef: wm_known_good_token
+    executeOnDelegate: false
+```
+
+> [!TIP]
+> The MCP server URL for Harness depends on your account's cluster. See the list [here](https://developer.harness.io/docs/platform/harness-ai/harness-agents/#harness-hosted-mcp-endpoints).
+
+> [!NOTE]
+> MCP servers can be configured in the agent definition or be added when consuming the agent step in a pipeline. Using an MCP server is optional. 
+
+### 5. Use the agent in a Harness pipeline
+
+Reference the registered agent with the **Agent** step type. Supply values for each declared input — values can be hardcoded, pipeline variables, or expressions referencing earlier step outputs:
 
 ```yaml
 - step:
@@ -155,7 +214,10 @@ Reference the registered agent with the **Agent** step type. Pass pipeline conte
       agentVersion: 1.0.0
       connectorRef: my_llm_connector
       inputs:
-        MY_CONTEXT: <+execution.steps.Previous_Step.output.outputVariables.LOGS>
+        repo: <+pipeline.variables.repoName>
+        branch: <+codebase.branch>
+        coverage_report: <+execution.steps.Run_Tests.output.outputVariables.COVERAGE>
+        threshold: 80
 ```
 
 Downstream steps can reference agent output with:
